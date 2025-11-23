@@ -43,23 +43,23 @@ formatv("{0,-=5}", "a")            // 输出："--a--"
 ```text
 { index [, layout] [: format] }
 ```
-
 {: .nolineno }
 
 1. 核心参数：
-   - `index`**（必填）**：非负整数，对应参数包中参数的索引位置，同一索引可以在格式字符串中多次引用（如 `"{0} {1} {0}"`）。
-   - `layout`（选填）：语法格式为 `[[char]loc]width`，用于控制输出内容的对齐、宽度和填充。
-   - `format`（选填）：类型特定的格式化选项。
+  - `index`**（必填）**：非负整数，对应参数包中参数的索引位置，同一索引可以在格式字符串中多次引用（如 `"{0} {1} {0}"`）。
+  - `layout`（选填）：语法格式为 `[[char]loc]width`，用于控制输出内容的对齐、宽度和填充。
+  - `format`（选填）：类型特定的格式化选项。
 
-   > 与 `std::format` 和 `std::vformat` 不同，`llvm::formatv` 必须指定 `index`，否则行为未定义。
-   > {: .prompt-warning }
+  > 与 `std::format` 和 `std::vformat` 不同，`llvm::formatv` 必须指定 `index`，否则行为未定义。
+  {: .prompt-warning }
 
 2. 布局（`layout`）用于控制字段在可用空间内的展示方式，只有指定了 `width`，对齐和填充才会生效：
-   - `width`：字段宽度。正整数，如果内容长度小于此值，将根据 `loc` 和 `char` 进行填充，否则直接输出内容，不进行填充。
-   - `loc`：对齐位置。`-` 左对齐，`=` 居中对齐，`+` 右对齐。
-   - `char`：填充字符。默认为空格。
+  - `width`：字段宽度。正整数，如果内容长度小于此值，将根据 `loc` 和 `char` 进行填充，否则直接输出内容，不进行填充。
+  - `loc`：对齐位置。`-` 左对齐，`=` 居中对齐，`+` 右对齐。
+  - `char`：填充字符。默认为空格。
 
-{% raw %} 3. 转义字符：`{` 和 `}` 是保留字符，如果要在输出中包含大括号，必须进行转义，使用双大括号 `{{` 来输出一个 `{` 字面量。
+{% raw %}
+3. 转义字符：`{` 和 `}` 是保留字符，如果要在输出中包含大括号，必须进行转义，使用双大括号 `{{` 来输出一个 `{` 字面量。
 {% endraw %}
 
 ---
@@ -157,9 +157,117 @@ expr            ::= <any string not containing delimeter>
 
 ## 三、实现解析
 
+LLVM 的 `formatv` 实现可以分为三个主要阶段：编译期参数适配、对象构建与存储、运行时格式化解析与输出。
+
+> 以下代码都经过简化，比如去掉了 `std::` 前缀、省略了 `std::forward` 等 boilerplate，在逻辑不变的前提下提高可读性，便于读者理解。
+{: .prompt-info }
+
+---
+
+### 1. 编译期参数适配
+
+`formatv` 本身的实现非常简单，只是依次对每个待格式化参数进行包装，再将包装结果以 tuple 形式连同 `Fmt`（格式串）一起打包进 `formatv_object` 中返回：
+
+```cpp
+template <typename... Ts>
+auto formatv(const char *Fmt, Ts&&... Vals) {
+  return formatv_object{Fmt, make_tuple(build_format_adapter(Vals)...)};
+}
+```
+
+包装逻辑都集中在 `build_format_adapter` 中，这是一个重载的函数模板，利用 SFINAE 特性对于不同类型应用不同的格式化适配器：
+
+> 我将其翻译成了等价的 `constexpr if` + `concepts` 实现以提高可读性。
+{: .prompt-info }
+
+```cpp
+template <typename T>
+auto build_format_adapter(T&& Item)
+{
+  if constexpr (is_base_of_v<format_adapter, remove_reference_t<T>>) {
+    return Item;
+
+  } else if (HasFormatProvider<T>) {
+    return provider_format_adapter<T>{Item};
+
+  } else if (HasStreamOperator<T>) {
+    return stream_operator_format_adapter<T>{Item};
+
+  } else {
+    return missing_format_adapter<T>{};
+  }
+}
+
+template <typename T>
+concept HasFormatProvider =
+  requires(decay_t<T> const& val, raw_ostream& stream, StringRef options)
+{
+  { format_provider<decay_t<T>>::format(val, stream, options) } -> same_as<void>;
+};
+
+template <typename T>
+concept HasStreamOperator =
+  requires(raw_ostream& os, decay_t<T> const& val)
+{
+  { os << val } -> same_as<raw_ostream&>;
+};
+```
+
+包装逻辑有四种，优先级从高到低：
+
+  1. 如果 `T` 继承自 `format_adapter`，则不进行任何包装，直接返回 `Item` 本身。
+
+  2. 如果存在 `format_provider<T>` 类模板特化，且该特化定义了以 `(T const&, raw_ostream&, StringRef)` 为参数的名为 `format` 的成员函数，则使用 `provider_format_adapter` 进行包装。
+
+  3. 如果能通过 ADL 查找到适用于 `T` 的 `operator<<` 重载，且该重载接受 `(raw_ostream&, T const&)` 并返回 `raw_ostream&`，则使用 `stream_operator_format_adapter` 进行包装。
+
+  4. 否则使用 `missing_format_adapter` 进行包装。
+
+> 如果要为自定义类型或第三方类型实现 `vformat` 支持，应首选特化 `format_provider` 的方式，这在全局范围内定义了 `T` 的默认格式化行为。
+>
+> 由于 `raw_ostream` 的流操作符接口不支持传递额外状态，所以 `stream_operator_format_adapter` 适配器不支持 `options` 参数，故不作为首选方式。
+{: .prompt-info }
+
+`format_adapter` 是一个多态基类，提供了 `format` 纯虚函数，`provider_format_adapter` 和 `stream_operator_format_adapter` 都继承自 `format_adapter`，它们重写的 `format` 将实际操作转发给 `format_provider<T>::format()` 和 `operator<<`，这使得所有满足条件的类型 `T` 经包装后都具备了统一的接口：
+
+> 适配器在 `formatv_object` 中仍以具体类型存储（避免堆分配），但在后续的格式化阶段可以通过多态基类 `format_adapter` 进行统一调度。
+{: .prompt-info }
+
+```cpp
+struct format_adapter {
+  virtual ~format_adapter() = default;
+  virtual void format(raw_ostream& S, StringRef Options) = 0;
+};
+
+template <typename T>
+struct provider_format_adapter : format_adapter {
+  T Item;
+  void format(raw_ostream& S, StringRef Options) override {
+    format_provider<decay_t<T>>::format(Item, S, Options);
+  }
+};
+
+template <typename T>
+struct stream_operator_format_adapter : format_adapter {
+  T Item;
+  void format(raw_ostream& S, StringRef) override { S << Item; }
+};
+
+template <typename T> class missing_format_adapter;
+```
+
+> 特化 `format_provider` 的方式也存在一定局限性，即无法覆盖已受支持类型的默认格式化行为。对于这种情况，应通过继承 `llvm::FormatAdapter<T>`（`format_adapter` 的浅包装类模板）并重写 `format` 虚函数来创建一个自定义格式化适配器，在调用 `formatv` 时不直接传递 `T` 类型对象，而是传递适配后的对象（例如 `formatv("{0}", format_int_custom{42}`)），这种方式也适用于在特定上下文中临时修改类型的默认格式化行为，为这套机制提供了相当不错的灵活性。
+{: .prompt-info }
+
+
+
+
+
+
+
 ```mermaid
 flowchart TD
-  Start(["调用 formatv(fmt, args...)"])
+  Start(["调用 formatv(Fmt, Vals...)"])
 
   subgraph SFINAE [" "]
     Start --> BuildAdapter
