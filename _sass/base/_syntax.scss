@@ -14,7 +14,8 @@
   @extend %code-snippet-bg;
 
   overflow: auto;
-  padding-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  padding-top: 0.5rem;
 
   @at-root figure#{&} {
     @extend %code-snippet-bg;
@@ -152,8 +153,8 @@ div[class^='language-'] {
   }
 
   .highlight {
-    border-top-left-radius: 0;
-    border-top-right-radius: 0;
+    // border-top-left-radius: 0;
+    // border-top-right-radius: 0;
   }
 }
 
@@ -177,7 +178,8 @@ div {
 .code-header {
   @extend %no-cursor;
 
-  display: flex;
+  // display: flex;
+  display: none;
   justify-content: space-between;
   align-items: center;
   height: v.$code-header-height;
