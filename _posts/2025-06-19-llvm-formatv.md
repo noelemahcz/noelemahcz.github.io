@@ -19,7 +19,9 @@ mermaid: true
 
 在剖析实现之前，有必要简单介绍一下 `llvm::formatv` 的使用方式，总体而言与 `std::format` 非常相似，差异主要集中在在类型特定的格式符上。
 
-### 基础示例
+---
+
+### 1. 基础示例
 
 ```cpp
 // 位置索引
@@ -32,7 +34,9 @@ formatv("{0, +5}", "a")            // 输出："    a"
 formatv("{0,-=5}", "a")            // 输出："--a--"
 ```
 
-### 格式化字符串语法
+---
+
+### 2. 格式化字符串语法
 
 `llvm::formatv` 使用包含替换序列（Replacement Sequence）的格式字符串，其核心语法结构如下：
 
@@ -41,28 +45,29 @@ formatv("{0,-=5}", "a")            // 输出："--a--"
 ```
 {: .nolineno }
 
-1. 核心参数：
-  - `index`**（必填）**：非负整数，对应参数包中参数的索引位置，同一索引可以在格式字符串中多次引用（如 `"{0} {1} {0}"`）。
-  - `layout`（选填）：语法格式为 `[[char]loc]width`，用于控制输出内容的对齐、宽度和填充。
-  - `format`（选填）：类型特定的格式化选项。
+1. `index`**（必填）**：非负整数，对应参数包中参数的索引位置，同一索引可以在格式字符串中多次引用（如 `"{0} {1} {0}"`）。
+2. `layout`（选填）：语法格式为 `[[char]loc]width`，用于控制输出内容的对齐、宽度和填充。
+3. `format`（选填）：类型特定的格式化选项。
 
-  > 与 `std::format` 和 `std::vformat` 不同，`llvm::formatv` 必须指定 `index`，否则行为未定义。
-  {: .prompt-warning }
+> 与 `std::format` 和 `std::vformat` 不同，`llvm::formatv` 必须指定 `index`，否则行为未定义。
+{: .prompt-warning }
 
-2. 布局（`layout`）用于控制字段在可用空间内的展示方式，只有指定了 `width`，对齐和填充才会生效：
+布局（`layout`）用于控制字段在可用空间内的展示方式，只有指定了 `width`，对齐和填充才会生效：
   - `width`：字段宽度。正整数，如果内容长度小于此值，将根据 `loc` 和 `char` 进行填充，否则直接输出内容，不进行填充。
   - `loc`：对齐位置。`-` 左对齐，`=` 居中对齐，`+` 右对齐。
   - `char`：填充字符。默认为空格。
 
 {% raw %}
-3. 转义字符：`{` 和 `}` 是保留字符，如果要在输出中包含大括号，必须进行转义，使用双大括号 `{{` 来输出一个 `{` 字面量。
+转义字符 `{` 和 `}` 是保留字符，如果要在输出中包含大括号，必须进行转义，使用双大括号 `{{` 来输出一个 `{` 纯文本。
 {% endraw %}
 
-### 内置格式化选项
+---
+
+### 3. 内置格式化选项
 
 `llvm::formatv` 的格式说明符（即 `{index:format}` 中的 `format` 部分）根据目标类型遵循不同的文法。
 
-#### 1. 整数类型（Integral）
+#### 3.1 整数类型（Integral）
 
 整数的格式字符串文法为：**`[style][digits]`**
 
@@ -78,7 +83,7 @@ formatv("{0,-=5}", "a")            // 输出："--a--"
 | **`x-`**        | 十六进制（小写，无前缀）    | `42`     | `x-`   | `2a`      |
 | **`X-`**        | 十六进制（大写，无前缀）    | `42`     | `X-`   | `2A`      |
 
-#### 2. 浮点类型（Floating Point）
+#### 3.2 浮点类型（Floating Point）
 
 浮点数的格式字符串文法为：**`[style][precision]`**
 
@@ -92,7 +97,7 @@ formatv("{0,-=5}", "a")            // 输出："--a--"
 | **`E`**         | 科学计数（大写） | `12345` | `E`    | `1.234500E+04`         |
 | **`e`**         | 科学计数（小写） | `12345` | `e3`   | `1.235e+04`（指定3位） |
 
-#### 3. 布尔类型（Boolean）
+#### 3.3 布尔类型（Boolean）
 
 默认样式为 **`t`**，即：`true / false`
 
@@ -104,7 +109,7 @@ formatv("{0,-=5}", "a")            // 输出："--a--"
 | **`Y`**         | YES / NO             | `YES`       | `NO`         |
 | **`D` / `d`**   | 0 / 1                | `1`         | `0`          |
 
-#### 4. 指针类型（Pointer）
+#### 3.4 指针类型（Pointer）
 
 指针主要按十六进制地址输出，文法结构类似整数。
 
@@ -113,7 +118,7 @@ formatv("{0,-=5}", "a")            // 输出："--a--"
 | **`x` / `X`**   | 十六进制（带前缀，默认） | `0xdeadbeef` / `0xDEADBEEF` |
 | **`x-` / `X-`** | 十六进制（无前缀）       | `deadbeef` / `DEADBEEF`     |
 
-#### 5. 范围与容器（Ranges / Containers）
+#### 3.5 范围与容器（Ranges / Containers）
 
 将任意 Ranges 打印为由 `separator` 分隔、以 `element_style` 指定的格式显示的元素序列，其 BNF 文法如下：
 
@@ -139,7 +144,7 @@ expr            ::= <any string not containing delimeter>
 
 ## 三、实现解析
 
-LLVM 的 `formatv` 实现可以分为三个主要阶段：编译期参数适配、对象构建与存储、运行时格式化解析与输出。
+LLVM 的 `formatv` 实现可以分为三个主要阶段：编译期参数适配、对象构建与存储、运行时解析与格式化。
 
 > 以下所有代码片段已适当简化，在保持逻辑等价的前提下提高可读性，以便于读者理解。
 {: .prompt-info }
@@ -257,7 +262,7 @@ template <typename T> class missing_format_adapter;
 > 特化 `format_provider` 的方式也存在一定局限性，即无法覆盖已受支持类型的默认格式化行为。对于这种情况，应通过继承 `llvm::FormatAdapter<T>`（`format_adapter` 的浅包装类模板）并重写 `format` 虚函数来创建一个自定义格式化适配器，在调用 `formatv` 时不直接传递 `T` 类型对象，而是传递适配后的对象（例如 `formatv("{0}", format_int_custom{42}`)），这种方式也适用于在特定上下文中临时修改类型的默认格式化行为，为这套格式化机制提供了灵活性。
 {: .prompt-info }
 
-> **FIXME**: 悬垂引用陷阱
+> **FIXME**: 按左值传递参数会使 `xxx_adapter` 存储参数的引用而非转移所有权，要小心悬垂引用问题
 {: .prompt-warning }
 
 ---
@@ -266,6 +271,7 @@ template <typename T> class missing_format_adapter;
 
 从上一阶段构建的 `std::tuple` 对象初始化一个轻量级的 `formatv_object` 中间对象，并不真正执行格式化。
 
+{% raw %}
 ```cpp
 class formatv_object_base {
 protected:
@@ -293,51 +299,294 @@ public:
   // ...
 };
 ```
+{% endraw %}
 
 LLVM 利用 `formatv_object` 及其基类 `formatv_object_base`，在不进行堆分配的前提下，实现了类型安全的变参存储和运行时随机访问：
 
 - 存储层（`formatv_object`）
     - 本身存储在栈上，通过 tuple 成员内联存储所有适配器对象（持有所有权），避免了堆分配带来的额外性能开销。
-    - 通过多态基类指针将异构元组转换为同构数组，这是后续解析阶段能够处理 `{1} {0}` 这种乱序占位符的前提。
+    - 通过多态基类指针将异构元组转换为同构数组，这是后续解析阶段能够处理 `{1} {0}` 这种乱序格式符的前提。
 
 - 逻辑层（`formatv_object_base`）
     - 采用模板类继承非模板基类的设计，将格式化逻辑分离进基类中，最大限度地减轻了模板实例化导致的代码膨胀问题（加快编译速度的同时也能提高指令缓存的命中率）。
 
 由于 `std::tuple` 仅支持编译期索引访问（通过 `std::get<N>`），而 `formatv` 的格式化字符串在运行期解析，这就需要一种通过运行期索引访问适配器参数的能力。
 
-具体而言，LLVM 利用 `std::apply` 将 tuple 展开，依次获取每个适配器元素的地址，并存储进类型为 `std::array<format_adapter*>` 的基类指针数组，建立了从“编译期元组索引”到“运行期数组索引”的映射，由此实现运行期随机访问适配器对象。
+具体而言，LLVM 利用 `std::apply` 将 tuple 展开，依次获取每个适配器元素的地址，并存储进类型为 `std::array<format_adapter*>` 的指针数组，建立了从“编译期派生类元组索引”到“运行期基类数组索引”的映射，由此实现运行期随机访问适配器对象。
 
-> `formatv` 函数最终返回的是 `formatv_object` 对象，此对象承载了格式化所需的所有上下文信息，但尚未执行任何字符串解析和格式化操作，因此开销极小。
->
-> 只有当用户显式调用 `.str()` / `operator std::string()` 或将其通过流操作符传输给 `raw_ostream` 时，才会调用 `format` 成员函数真正开始解析，这种惰性解析和格式化机制可以避免不必要的字符串拼接和内存分配开销。
-{: .prompt-info }
+---
 
+### 3. 运行时解析与格式化
 
+`formatv` 函数最终返回的是 `formatv_object` 对象，此对象承载了格式化所需的所有上下文信息，但尚未执行任何字符串解析和格式化操作。
 
+只有当用户显式调用 `.str()` / `operator std::string()` 或将其通过流操作符传输给 `raw_ostream` 时，才会调用 `format` 成员函数真正开始解析，这种惰性解析和格式化机制可以避免不必要的字符串拼接和内存分配开销。
 
+---
 
+#### 3.1 核心数据结构：`ReplacementItem`
 
+解析器将格式字符串拆解为一系列的替换项（`ReplacementItem`），每个替换项要么是无需处理的纯文本（`Literal`），要么是具体的格式符（`Format`）：
 
+```cpp
+struct ReplacementItem {
+  ReplacementItem() = default;
+  explicit ReplacementItem(StringRef Literal)
+      : Type(ReplacementType::Literal), Spec(Literal) {}
+  ReplacementItem(StringRef Spec, size_t Index, size_t Align, AlignStyle Where,
+                  char Pad, StringRef Options)
+      : Type(ReplacementType::Format), Spec(Spec), Index(Index), Align(Align),
+        Where(Where), Pad(Pad), Options(Options) {}
 
+  ReplacementType Type = ReplacementType::Empty;
+  StringRef Spec;     // 包含左右大括号的完整格式符，或纯文本
+  size_t Index = 0;   // 参数索引
+  size_t Align = 0;   // 对齐宽度
+  AlignStyle Where = AlignStyle::Right; // 对齐方向
+  char Pad = 0;       // 填充字符
+  StringRef Options;  // 类型特定的自定义格式化选项
+};
+```
 
+---
 
-<!-- 1. 泛型存储容器 `formatv_object<Tuple>`： -->
-<!--   - 使用 `std::tuple<Adapters...>` 作为底层存储，保留了适配器的具体类型 -->
-<!--   - 拥有所有适配器对象的所有权 -->
-<!--   - 不进行任何堆分配 -->
-<!---->
-<!-- 2. 运行时索引与类型擦除 -->
-<!---->
-<!--   `std::tuple` 仅支持编译期索引访问（通过 `std::get<N>`），而 `formatv` 的格式化字符串是在运行期解析，因此需要引入类型擦除机制来实现参数的随机访问。 -->
-<!---->
-<!--   `formatv_object` 内部（通过继承）维护了一个 `std::array<format_adapter*, N>` 类型的数组，在构造函数中利用 `std::apply` 展开 tuple，将每个适配器的地址存入该数组。 -->
-<!---->
-<!--   这是一种典型的**非拥有（Non-owning）**转换，同时也发生了类型擦除：tuple 实际拥有适配器对象，array 仅持有指向 tuple 内元素的基类指针，通过此 array 进行随机访问。 -->
+#### 3.2 格式字符串解析
 
+##### **A. 驱动层 `parseFormatString`**
 
+这是解析的入口，负责驱动格式串的解析工作，此函数采用线性扫描的方式，循环调用 `splitLiteralAndReplacement`，将格式串 `Fmt` 切分为 `ReplacementItem` 列表。
 
+```cpp
+SmallVector<ReplacementItem, 2>
+formatv_object_base::parseFormatString(StringRef Fmt) {
+  SmallVector<ReplacementItem, 2> Replacements;
+  ReplacementItem I;
+  while (!Fmt.empty()) {
+    // 每次处理一个 `Item`，并将 `Fmt` 更新为剩余部分
+    std::tie(I, Fmt) = splitLiteralAndReplacement(Fmt);
+    if (I.Type != ReplacementType::Empty)
+      Replacements.push_back(I);
+  }
+  return Replacements;
+}
+```
 
+> **FIXME**: `StringRef` 避免拷贝
+{: .prompt-warning }
 
+> **FIXME**: `SmallVector` 长度为 2 对 `formatv("XXX: {}")` 场景优化
+{: .prompt-warning }
+
+---
+
+##### **B. 词法解析层 `splitLiteralAndReplacement`**
+
+{% raw %}
+此函数负责在字符串流中定位下一个格式符的边界，核心逻辑是处理转义和检查括号的匹配性，解析步骤如下：
+  1. 搜索第一个左大括号 `{`，在此之前的所有内容都被视为纯文本（`Literal`）。
+  2. 如果遇到连续的两个左大括号 `{{` 则视为转义序列，解析为单个 `{` 并同样作为纯文本输出，然后跳过这两个字符继续扫描。
+  3. 搜索匹配的右大括号 `}`，如果未找到，或者在找到之前又遇到了额外的左大括号 `{`，则在 **Debug** 模式下触发断言，或在 **Release** 模式下将其视为无效格式并回退为纯文本处理，这是一种容错机制。
+  4. 最后对提取出的 `{...}` 子串调用 `parseReplacementItem` 进行进一步解析。
+{% endraw %}
+
+{% raw %}
+```cpp
+std::pair<ReplacementItem, StringRef>
+formatv_object_base::splitLiteralAndReplacement(StringRef Fmt) {
+  while (!Fmt.empty()) {
+    // 1. 处理直到第一个 '{' 前的纯文本
+    if (Fmt.front() != '{') {
+      std::size_t BO = Fmt.find_first_of('{');
+      return std::make_pair(ReplacementItem{Fmt.substr(0, BO)}, Fmt.substr(BO));
+    }
+
+    // 2. 处理转义序列 '{{'
+    StringRef Braces = Fmt.take_while([](char C) { return C == '{'; });
+    // If there is more than one brace, then some of them are escaped.  Treat
+    // these as replacements.
+    if (Braces.size() > 1) {
+      size_t NumEscapedBraces = Braces.size() / 2;
+      StringRef Middle = Fmt.take_front(NumEscapedBraces);
+      StringRef Right = Fmt.drop_front(NumEscapedBraces * 2);
+      return std::make_pair(ReplacementItem{Middle}, Right);
+    }
+
+    // 3. 捕获完整格式符 '{...}'
+    std::size_t BC = Fmt.find_first_of('}');
+    if (BC == StringRef::npos) {
+      assert(
+          false &&
+          "Unterminated brace sequence.  Escape with {{ for a literal brace.");
+      return std::make_pair(ReplacementItem{Fmt}, StringRef());
+    }
+
+    // 额外检查格式符内部是否重复出现 '{'
+    std::size_t BO2 = Fmt.find_first_of('{', 1);
+    if (BO2 < BC)
+      return std::make_pair(ReplacementItem{Fmt.substr(0, BO2)},
+                            Fmt.substr(BO2));
+
+    // 4. 对格式符进行语法解析
+    StringRef Spec = Fmt.slice(1, BC);
+    StringRef Right = Fmt.substr(BC + 1);
+
+    auto RI = parseReplacementItem(Spec);
+    if (RI)
+      return std::make_pair(*RI, Right);
+
+    // 5. 如果解析出错则静默忽略错误
+    // 注意，这在目前版本的实现中永远不会发生，此处为 Dead Code
+    // 因为 `parseReplacementItem` 对于失败的情况返回 `ReplacementItem{}` 而非 `std::nullopt`
+    Fmt = Fmt.drop_front(BC + 1);
+  }
+  return std::make_pair(ReplacementItem{Fmt}, StringRef());
+}
+```
+{% endraw %}
+
+---
+
+##### **C. 语法解析层 `parseReplacementItem`**
+
+此函数负责解析格式符内部语法，其格式（`{ Index ,Layout :Options}`）前文已有介绍，解析步骤如下：
+  1. `Index`：解析开头的数字，确定该格式符对应第几个参数。
+  2. `Layout`：检查是否存在 `,`，如果存在，则调用 `consumeFieldLayout` 解析对齐规则。支持的语法包括：对齐方向（`-` 左对齐 / `=` 居中对齐 / `+` 右对齐），填充字符（可选，默认为空格）以及对齐宽度（整数）。
+  3. `Options`：检查是否存在 `:`，如果存在，则冒号后的所有内容都被视作自定义格式化选项，原样传递给具体类型。
+
+```cpp
+std::optional<ReplacementItem>
+formatv_object_base::parseReplacementItem(StringRef Spec) {
+  StringRef RepString = Spec.trim("{}");
+
+  char Pad = ' ';
+  std::size_t Align = 0;
+  AlignStyle Where = AlignStyle::Right;
+  StringRef Options;
+  size_t Index = 0;
+  RepString = RepString.trim();
+
+  // 1. 解析索引
+  if (RepString.consumeInteger(0, Index)) {
+    assert(false && "Invalid replacement sequence index!");
+    return ReplacementItem{};
+  }
+
+  // 2. 解析布局
+  RepString = RepString.trim();
+  if (RepString.consume_front(",")) {
+    if (!consumeFieldLayout(RepString, Where, Align, Pad))
+      assert(false && "Invalid replacement field layout specification!");
+  }
+
+  // 3. 解析自定义格式化选项
+  RepString = RepString.trim();
+  if (!RepString.empty() && RepString.front() == ':') {
+    Options = RepString.drop_front().trim();
+    RepString = StringRef();
+  }
+
+  RepString = RepString.trim();
+  if (!RepString.empty()) {
+    assert(false && "Unexpected characters found in replacement string!");
+  }
+
+  return ReplacementItem{Spec, Index, Align, Where, Pad, Options};
+}
+
+// 辅助函数，解析 `, align_spec` 部分
+bool formatv_object_base::consumeFieldLayout(StringRef &Spec, AlignStyle &Where,
+                                             size_t &Align, char &Pad) {
+  Where = AlignStyle::Right;
+  Align = 0;
+  Pad = ' ';
+  if (Spec.empty())
+    return true;
+
+  if (Spec.size() > 1) {
+    // A maximum of 2 characters at the beginning can be used for something
+    // other
+    // than the width.
+    // If Spec[1] is a loc char, then Spec[0] is a pad char and Spec[2:...]
+    // contains the width.
+    // Otherwise, if Spec[0] is a loc char, then Spec[1:...] contains the width.
+    // Otherwise, Spec[0:...] contains the width.
+    if (auto Loc = translateLocChar(Spec[1])) {
+      Pad = Spec[0];
+      Where = *Loc;
+      Spec = Spec.drop_front(2);
+    } else if (auto Loc = translateLocChar(Spec[0])) {
+      Where = *Loc;
+      Spec = Spec.drop_front(1);
+    }
+  }
+
+  bool Failed = Spec.consumeInteger(0, Align);
+  return !Failed;
+}
+
+// 辅助函数，解析对齐字符（`-` / `=` / `+`）
+static std::optional<AlignStyle> translateLocChar(char C) {
+  switch (C) {
+  case '-':
+    return AlignStyle::Left;
+  case '=':
+    return AlignStyle::Center;
+  case '+':
+    return AlignStyle::Right;
+  default:
+    return std::nullopt;
+  }
+  LLVM_BUILTIN_UNREACHABLE;
+}
+```
+
+---
+
+#### 3.3 最终格式化循环
+
+当格式串解析完成后，`formatv_object_base::format` 函数进行最后的处理，它遍历替换项（`ReplacementItem`）列表，将其与第二阶段构建的适配器数组（`Adapters`）相结合，循环执行以下逻辑：
+
+如果替换项类型为纯文本或转义字符（`Literal`），直接原样输出；如果是格式符（`Format`）：
+  1. 首先通过 `R.Index` 从基类指针数组 `Adapters` 中获取对应的适配器（实现 O(1) 随机访问）。
+  2. 使用辅助类 `FmtAlign` 包装适配器，根据解析出的布局参数处理对齐逻辑。
+  3. 最后发起 `Align.format(S, R.Options)` 多态虚调用，执行 LLVM 内置或用户自定义的格式化逻辑。
+
+```cpp
+void formatv_object_base::format(raw_ostream &S) const {
+  // 获取解析后的 `ReplacementItem` 列表
+  for (auto &R : parseFormatString(Fmt)) {
+
+    // 跳过空类型
+    if (R.Type == ReplacementType::Empty)
+      continue;
+
+    // 如果是纯文本，直接写入流
+    if (R.Type == ReplacementType::Literal) {
+      S << R.Spec;
+      continue;
+    }
+
+    // 如果是格式符，执行索引的边界检查
+    // 如果越界会将格式符视为纯文本直接写入流
+    if (R.Index >= Adapters.size()) {
+      S << R.Spec;
+      continue;
+    }
+
+    // 从基类指针数组中获取适配器
+    auto *W = Adapters[R.Index];
+
+    // 通过对齐装饰器委托最终的格式化调用（Decorator Pattern）
+    FmtAlign Align(*W, R.Where, R.Align, R.Pad);
+    Align.format(S, R.Options);
+  }
+}
+```
+
+---
+
+> **FIXME**: `FmtAlign` 实现细节
+{: .prompt-warning }
 
 ---
 
