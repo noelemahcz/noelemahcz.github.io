@@ -230,7 +230,7 @@ concept HasStreamOperator =
 > 如果要为自定义类型或第三方类型实现 `vformat` 支持，应首选特化 `format_provider` 的方式，在全局范围内定义 `T` 的默认格式化行为。
 >
 > 由于 `raw_ostream` 的流操作符接口不支持传递额外状态，所以 `stream_operator_format_adapter` 适配器不支持 `options` 参数，故不作为首选方式。
-{: .prompt-info }
+{: .prompt-tip }
 
 `format_adapter` 是一个多态基类，提供了 `format` 纯虚函数，`provider_format_adapter` 和 `stream_operator_format_adapter` 都继承自 `format_adapter`，它们重写的 `format` 将实际操作转发给 `format_provider<T>::format()` 和 `operator<<`，这使得所有满足条件的类型 `T` 经包装后都具备了统一的接口：
 
@@ -260,10 +260,17 @@ template <typename T> class missing_format_adapter;
 当类型 `T` 不满足前三种情况时就会实例化 `missing_format_adapter`，这是一个**不完整类型**，对其进行实例化会触发编译期报错（类型安全），并且它的类型名本身就是清晰的诊断信息。
 
 > 特化 `format_provider` 的方式也存在一定局限性，即无法覆盖已受支持类型的默认格式化行为。对于这种情况，应通过继承 `llvm::FormatAdapter<T>`（`format_adapter` 的浅包装类模板）并重写 `format` 虚函数来创建一个自定义格式化适配器，在调用 `formatv` 时不直接传递 `T` 类型对象，而是传递适配后的对象（例如 `formatv("{0}", format_int_custom{42}`)），这种方式也适用于在特定上下文中临时修改类型的默认格式化行为，为这套格式化机制提供了灵活性。
-{: .prompt-info }
+{: .prompt-tip }
 
-> **FIXME**: 按左值传递参数会使 `xxx_adapter` 存储参数的引用而非转移所有权，要小心悬垂引用问题
-{: .prompt-warning }
+> **`foramtv` 的生命周期管理机制**
+>
+> `formatv` 通过转发引用（`T&&`）对左值和右值参数采用了不同的存储策略，兼顾了性能与安全性：
+>
+>   - **左值（lvalue）**：当参数按左值传递时（如 formatv("{0}", xxxVar)），模板参数 `T` 被推导为左值引用类型，适配器内部的 `T Item` 成员也随之成为引用，这避免了非必要的拷贝开销，但同时也意味着 `formatv_object` 并不持有该对象，调用者须确保参数对象在格式化完成前持续存活。
+>   - **右值（rvalue）**：当参数按右值传递时（如 formatv("{0}", getXXX())），模板参数 `T` 被推导为非引用类型，参数通过 `std::forward` 移动进适配器中，将所有权转移给了适配器对象。
+>
+> 这种设计解决了**全表达式（Full Expression）**生命周期问题，例如 `auto fmt = formatv("{0}", getXXX());` `llvm::err() << fmt;` 是安全的，因为 `getXXX()` 返回的临时对象已经被移动进了 `fmt` 中，与 `fmt` 的生命周期绑定。
+{: .prompt-info }
 
 ---
 
@@ -281,6 +288,9 @@ protected:
   formatv_object_base(StringRef Fmt, ArrayRef<format_adapter*> Adapters)
       : Fmt(Fmt), Adapters(Adapters) {}
 
+  formatv_object_base(formatv_object_base const &rhs) = delete;
+  formatv_object_base(formatv_object_base &&rhs) = default;
+
   // ...
 };
 
@@ -292,8 +302,17 @@ class formatv_object : public formatv_object_base {
 public:
   formatv_object(StringRef Fmt, Tuple&& Params)
       : formatv_object_base(Fmt, ParameterPointers),
-        Parameters(move(Params)) {
+        Parameters(std::move(Params)) {
     ParameterPointers = apply([](Ts&... xs) { return {{&xs...}}; }, Parameters);
+  }
+
+  formatv_object(formatv_object const &rhs) = delete;
+
+  formatv_object(formatv_object &&rhs)
+      : formatv_object_base(std::move(rhs)),
+        Parameters(std::move(rhs.Parameters)) {
+    ParameterPointers = apply(create_adapters(), Parameters);
+    Adapters = ParameterPointers;
   }
 
   // ...
@@ -313,6 +332,9 @@ LLVM 利用 `formatv_object` 及其基类 `formatv_object_base`，在不进行�
 由于 `std::tuple` 仅支持编译期索引访问（通过 `std::get<N>`），而 `formatv` 的格式化字符串在运行期解析，这就需要一种通过运行期索引访问适配器参数的能力。
 
 具体而言，LLVM 利用 `std::apply` 将 tuple 展开，依次获取每个适配器元素的地址，并存储进类型为 `std::array<format_adapter*>` 的指针数组，建立了从“编译期派生类元组索引”到“运行期基类数组索引”的映射，由此实现运行期随机访问适配器对象。
+
+> **FIXME**：拷贝构造函数被删除，自定义移动构造函数。
+{: .prompt-danger }
 
 ---
 
@@ -352,6 +374,15 @@ struct ReplacementItem {
 
 #### 3.2 格式字符串解析
 
+> **`StringRef` 的零拷贝优势**
+>
+> `foramtv` 格式串的解析实现中大量使用了 `StringRef`，这是 LLVM 中的字符串视图类（类似 C++17 `std::string_view`）。
+>
+> 在后续的解析逻辑中，所有字符串操作（如 `substr`、`slice`、`drop_front` 等）都只是通过调整 `StringRef` 对象内部的指针和长度字段来实现，整个解析过程中不会发生任何堆内存分配或字符串拷贝，这极大地提高了解析性能。
+{: .prompt-tip }
+
+---
+
 ##### **A. 驱动层 `parseFormatString`**
 
 这是解析的入口，负责驱动格式串的解析工作，此函数采用线性扫描的方式，循环调用 `splitLiteralAndReplacement`，将格式串 `Fmt` 切分为 `ReplacementItem` 列表。
@@ -371,11 +402,12 @@ formatv_object_base::parseFormatString(StringRef Fmt) {
 }
 ```
 
-> **FIXME**: `StringRef` 避免拷贝
-{: .prompt-warning }
-
-> **FIXME**: `SmallVector` 长度为 2 对 `formatv("XXX: {}")` 场景优化
-{: .prompt-warning }
+> **`SmallVector` 的小对象优化（SBO --- Small Buffer Optimization）**
+>
+> `parseFormatString` 返回类型 `SmallVector<ReplacementItem, 2>` 中的 `2` 是一个精心挑选的数值，在 `formatv` 的大部分使用场景中，格式串可能都非常简单（如 `"Result: {0}"`），这会被切分为一个纯文本项 `"Result: "` 和一个格式项 `"{0}"`，刚好是 2 个元素。
+>
+> 通过预留 2 个元素大小的内联存储空间，`SmallVector` 可以直接在栈上管理 `ReplacementItem` 对象，在简单格式串场景下，这能够完全避免堆内存分配，显著提升了高频格式化输出情况下的性能表现。
+{: .prompt-tip }
 
 ---
 
@@ -585,8 +617,8 @@ void formatv_object_base::format(raw_ostream &S) const {
 
 ---
 
-> **FIXME**: `FmtAlign` 实现细节
-{: .prompt-warning }
+> **FIXME**：`FmtAlign` 实现细节
+{: .prompt-danger }
 
 ---
 
