@@ -266,10 +266,10 @@ template <typename T> class missing_format_adapter;
 >
 > `formatv` 通过转发引用（`T&&`）对左值和右值参数采用了不同的存储策略，兼顾了性能与安全性：
 >
->   - **左值（lvalue）**：当参数按左值传递时（如 formatv("{0}", xxxVar)），模板参数 `T` 被推导为左值引用类型，适配器内部的 `T Item` 成员也随之成为引用，这避免了非必要的拷贝开销，但同时也意味着 `formatv_object` 并不持有该对象，调用者须确保参数对象在格式化完成前持续存活。
->   - **右值（rvalue）**：当参数按右值传递时（如 formatv("{0}", getXXX())），模板参数 `T` 被推导为非引用类型，参数通过 `std::forward` 移动进适配器中，将所有权转移给了适配器对象。
+>   - **左值（lvalue）**：当参数按左值传递时（如 `formatv("{0}", xxxVar)`），模板参数 `T` 被推导为左值引用类型，适配器内部的 `T Item` 成员也随之成为引用，这避免了非必要的拷贝开销，但同时也意味着 `formatv_object` 并不持有该对象，调用者须确保参数对象在格式化完成前持续存活。
+>   - **右值（rvalue）**：当参数按右值传递时（如 `formatv("{0}", getXXX())`），模板参数 `T` 被推导为非引用类型，参数通过 `std::forward` 移动进适配器中，将所有权转移给了适配器对象。
 >
-> 这种设计解决了**全表达式（Full Expression）**生命周期问题，例如 `auto fmt = formatv("{0}", getXXX());` `llvm::err() << fmt;` 是安全的，因为 `getXXX()` 返回的临时对象已经被移动进了 `fmt` 中，与 `fmt` 的生命周期绑定。
+> 这种设计解决了**全表达式（Full Expression）**的生命周期问题，例如 `auto fmt = formatv("{0}", getXXX()); llvm::err() << fmt;` 是安全的，因为 `getXXX()` 返回的临时对象已经被移动进了 `fmt` 中，与 `fmt` 的生命周期绑定。
 {: .prompt-info }
 
 ---
@@ -333,8 +333,12 @@ LLVM 利用 `formatv_object` 及其基类 `formatv_object_base`，在不进行�
 
 具体而言，LLVM 利用 `std::apply` 将 tuple 展开，依次获取每个适配器元素的地址，并存储进类型为 `std::array<format_adapter*>` 的指针数组，建立了从“编译期派生类元组索引”到“运行期基类数组索引”的映射，由此实现运行期随机访问适配器对象。
 
-> **FIXME**：拷贝构造函数被删除，自定义移动构造函数。
-{: .prompt-danger }
+> **`formatv_object` 的移动语义**
+>
+>   - 移动构造：`formatv_object` 是一个典型的自引用数据结构，编译器默认生成的移动构造函数仅拷贝数组中的指针值，导致新对象中的指针仍指向旧对象中的 tuple 元素，产生悬垂指针。因此需要自定义移动构造函数，在移动 tuple 后更新指针数组，使其正确指向新对象自身的 tuple 元素。
+>
+>   - 禁止拷贝：`formatv` 允许按右值传递参数，如果参数包含不可拷贝的类型（Move-only Types），`formatv_object` 本身在语义上就必须同样是不可拷贝的。并且 `formatv_object` 在设计上属于一种瞬态（Transient）对象，仅用于在生产点和消费点之间传递上下文，禁止拷贝也能防止调用者错误地长期持有该对象而导致悬垂指针/引用。
+{: .prompt-info }
 
 ---
 
@@ -346,7 +350,7 @@ LLVM 利用 `formatv_object` 及其基类 `formatv_object_base`，在不进行�
 
 ---
 
-#### 3.1 核心数据结构：`ReplacementItem`
+#### 3.1 关键数据结构：`ReplacementItem`
 
 解析器将格式字符串拆解为一系列的替换项（`ReplacementItem`），每个替换项要么是无需处理的纯文本（`Literal`），要么是具体的格式符（`Format`）：
 
@@ -574,7 +578,7 @@ static std::optional<AlignStyle> translateLocChar(char C) {
 
 ---
 
-#### 3.3 最终格式化循环
+#### 3.3 循环处理替换项
 
 当格式串解析完成后，`formatv_object_base::format` 函数进行最后的处理，它遍历替换项（`ReplacementItem`）列表，将其与第二阶段构建的适配器数组（`Adapters`）相结合，循环执行以下逻辑：
 
@@ -617,10 +621,96 @@ void formatv_object_base::format(raw_ostream &S) const {
 
 ---
 
-> **FIXME**：`FmtAlign` 实现细节
-{: .prompt-danger }
+#### 3.4 对齐与填充逻辑
+
+`FmtAlign` 是最后一个环节，它是一个典型的 [**Decorator（装饰器）**](https://en.wikipedia.org/wiki/Decorator_pattern)，持有指向具体适配器的引用，负责处理通用的对齐和填充逻辑，将具体的格式化逻辑与布局控制解耦。
+
+对于右对齐和居中对齐的情况，我们需要先知道内容格式化后的最终长度，才能计算出需要预先输出多少个填充字符，但 `raw_ostream` 是一个前向输出流（Forward Stream），内容一旦写入便无法撤回，也不支持在任意位置插入内容，为了解决这个问题，LLVM 采用了中间缓冲策略，具体实现如下：
+
+```cpp
+enum class AlignStyle { Left, Center, Right };
+
+struct FmtAlign {
+  format_adapter& Adapter;
+  AlignStyle Where;
+  size_t Amount;
+  char Fill;
+
+  FmtAlign(format_adapter& Adapter, AlignStyle Where, size_t Amount,
+           char Fill = ' ')
+      : Adapter(Adapter), Where(Where), Amount(Amount), Fill(Fill) {}
+
+  void format(raw_ostream& S, StringRef Options) {
+    // 1. 快速路径：如果没有指定对齐宽度，直接输出到目标流
+    if (Amount == 0) {
+      Adapter.format(S, Options);
+      return;
+    }
+
+    // 2. 中间缓冲：先输出到临时容器以计算长度
+    SmallString<64> Item;
+    raw_svector_ostream Stream(Item);
+    Adapter.format(Stream, Options);
+
+    // 3. 如果实际长度超过指定宽度，则忽略对齐直接输出
+    if (Amount <= Item.size()) {
+      S << Item;
+      return;
+    }
+
+    // 4. 计算填充并输出
+    size_t PadAmount = Amount - Item.size();
+    switch (Where) {
+
+    // 左对齐：先写入内容，后写入填充
+    case AlignStyle::Left:
+      S << Item;
+      fill(S, PadAmount);
+      break;
+
+    // 居中对齐
+    case AlignStyle::Center: {
+      size_t X = PadAmount / 2;
+      fill(S, X);             // 先填充左侧
+      S << Item;              // 输出内容
+      fill(S, PadAmount - X); // 再填充右侧（兼容奇数情况）
+      break;
+    }
+
+    // 右对齐：先写入填充，后写入内容
+    default:
+      fill(S, PadAmount);
+      S << Item;
+      break;
+    }
+  }
+
+private:
+  void fill(raw_ostream& S, size_t Count) {
+    for (size_t I = 0; I < Count; ++I)
+      S << Fill;
+  }
+};
+```
+
+只有当调用者指定了对齐宽度（`Amount > 0`）时，`FmtAlign` 才会启用缓冲策略。
+
+它使用 `SmallString<64>` 配合 `raw_svector_ostream` 作为临时容器，在将数据写入这个临时流后，通过 `Item.size()` 获取结果字符串的长度，然后再根据对齐方式将填充字符和缓冲区内容按顺序写入真正的目标流 `S`。
+
+虽然引入了一次额外拷贝，但由于 `SmallString` 带有栈上小对象优化（SBO），使得当格式化结果小于 64 字节时（绝大多数情况）可以完全避免堆内存分配。
+
+> **潜在优化空间**
+>
+> 源码注释中提到了一处可以优化的逻辑：当 `AlignStyle` 是 `Left`（左对齐）时并不需要预先知道结果字符串的长度，可以直接向目标流 `S` 写入内容，统计写入的字节数，再计算并补齐填充字符。
+>
+> 目前的实现为了保持代码结构的一致性，对所有对齐类型都统一采用了缓冲策略。
+{: .prompt-tip }
 
 ---
+
+## 四、调用流程图
+
+下图展示了 `formatv` 从被调用到最终输出的完整流程：
 
 ```mermaid
 flowchart TD
@@ -677,3 +767,14 @@ flowchart TD
   Iterate -- "遍历完成" --> End
   End([最终结果])
 ```
+
+---
+
+## 五、总结
+
+`llvm::formatv` 的设计核心在于平衡类型安全、灵活性与运行时性能，可以总结归纳为三个层面：
+  1. 编译期适配：利用 SFINAE 机制自动识别参数特征（`operator<<` 或 `format_provider`），并将其封装为统一的多态接口，在保证类型安全的前提下提供了灵活的扩展能力。
+  2. 存储和访问：通过 `std::tuple` 实现参数的内联存储与生命周期管理，配合基类指针数组擦除类型，实现了对可变参数列表的运行时随机访问。
+  3. 运行时解析：采用惰性解析策略，并且在实现中充分利用了 `StringRef` 的视图特性与 `SmallVector` / `SmallString` 的小对象优化（SBO）特性，极大程度减少了内存拷贝与堆分配开销。
+
+这种结合了编译期元编程与运行时零拷贝解析的混合设计，使其在提供了类似 C++20 `std::format` 丰富功能的同时，也能无缝与 LLVM 自身的 `raw_ostream` 体系相结合，展示了如何在不引入重型依赖的情况下实现高效的变参/乱序格式化工具，为系统级 C++ 开发提供了优秀的参考。
