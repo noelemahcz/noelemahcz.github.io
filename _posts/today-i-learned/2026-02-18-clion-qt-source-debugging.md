@@ -16,6 +16,8 @@ tags: [TIL, C++, Qt, CLion]
 
 这一步没什么可说的，获取 Qt 预编译二进制的主要方式就是 Official Online Installer，安装时同时勾选 "Sources" 和 "Qt Debug Information Files" 项即可，Installer 会将源码安装到如 "C:\Qt\6.10.2\Src" 的位置，调试符号则会和 Qt Binaries 放在一起，如 "C:\Qt\6.10.2\msvc2022_64\bin"。
 
+![Qt Online Installer](/assets/images/posts/today-i-learned/2026-02-18-clion-qt-source-debugging/qt_online_installer.png)
+
 ---
 
 ## 三、配置 CLion LLDB
@@ -86,7 +88,17 @@ PS C:\Qt\6.10.2\msvc2022_64\bin> llvm-pdbutil dump --summary Qt6Cored.pdb
 
 这说明 PDB 文件是没有问题的，我觉得大概率是 CLion 和 LLDB 后端的交互问题，或者是 CLion 的设置问题。
 
-仔细翻了一遍 CLion 的 Debug 相关设置，发现了一项名为 "Hide out-of-scope variables" 的选项默认是勾选的，取消勾选后果然就正常显示了，问题解决，可以开心调试了。
+仔细翻了一遍 CLion 的 Debug 相关设置，发现了一项名为 "Hide out-of-scope variables" 的选项默认是勾选的，取消勾选后果然就正常显示了：
+
+![CLion Debug Settings](/assets/images/posts/today-i-learned/2026-02-18-clion-qt-source-debugging/clion_debug_settings.png)
+
+---
+
+## 五、问题解决
+
+至此，可以用 CLion 开心调试 Qt 源码了，效果如下：
+
+![CLion Variables View](/assets/images/posts/today-i-learned/2026-02-18-clion-qt-source-debugging/clion_variables_view.png)
 
 > 不确定这是 CLion 的 BUG 还是就是这样设计的，按理说进入到 Qt 函数的作用域后不应该判定其参数和局部变量 "out-of-scope"。
 {: .prompt-info }
