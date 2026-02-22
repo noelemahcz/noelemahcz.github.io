@@ -321,11 +321,82 @@ flowchart TD
 
 同时，`impl` 函数内部针对 `Compare` 操作的实现，也解释了为何 `Qt::UniqueConnection` 在面对 Lambda 表达式时存在局限性：由于 Lambda 表达式在 C++ 标准中无法进行相等性比较，代码在这里针对非成员函数指针类型直接使用了 `Q_FALLTHROUGH()`，使得比较操作默认返回 `false`。
 
+---
+
+## 五、 Context 对象和 Contextless 连接
+
+在理解了 `QSlotObjectBase` 的多态封装和挂载机制后，还需要注意一下 Connection 对象的生命周期管理与线程关联性，这涉及 `connect` 函数模板中 `context` 参数的具体作用，以及三参数重载存在的一些隐患。
+
+### Contextless 连接的底层行为
+
+Qt 提供了一个省略 `context` 参数的三参数重载版本，用于直接连接信号与 Lambda 表达式。其内部源码实现如下：
+
+```cpp
+#ifndef QT_NO_CONTEXTLESS_CONNECT
+    // connect without context
+    template <typename Func1, typename Func2>
+    static inline QMetaObject::Connection
+        connect(const typename QtPrivate::FunctionPointer<Func1>::Object *sender, Func1 signal, Func2 &&slot)
+    {
+        return connect(sender, signal, sender, std::forward<Func2>(slot), Qt::DirectConnection);
+    }
+#endif // QT_NO_CONTEXTLESS_CONNECT
+```
+
+可以看出，当省略 `context` 时 Qt 内部实际执行了两个操作：
+  1. 将 `sender` 指针本身作为 `context`（即内部构建 `Connection` 对象时的 `receiver` 字段）传入。
+  2. 强制指定连接类型为 `Qt::DirectConnection`。
+
+### 生命周期管理与悬垂指针
+
+在 Qt 的对象模型中，`Connection` 的生命周期由 `sender` 和 `receiver`（即 `context`）共同约束。当两者中任意一个对象被销毁时，`QObject` 析构函数会自动遍历并清理相关联的连接表，以断开连接。
+
+在三参数重载中，由于 `context` 被硬编码为 `sender`，该连接的生命周期被完全绑定在发送者单一对象上。
+
+如果传入的 Lambda 表达式内部捕获了外部变量（典型如 `this` 指针），且该外部对象的生命周期短于 `sender`，那么即使该对象已销毁，连接却依然保持有效。
+
+后续 `sender` 触发信号时，底层调用 `SlotObj->call(...)` 执行 Lambda 将直接访问已释放的内存（悬垂指针），导致程序崩溃。
+
+标准的四参数重载通过允许显式传入 `context` 对象，使得当 `context` 销毁时连接自动断开，从机制上避免了生命周期陷阱。
+
+### 线程调度与数据竞争
+
+除了生命周期，`context` 还决定了跨线程信号投递时的目标事件循环。
+
+我们在前文的 `QObjectPrivate::connectImpl` 源码中看到，底层构建 `Connection` 对象时，会读取 `receiver` 所在线程的 `QThreadData` 并保存。
+
+对于默认的 `AutoConnection`，当信号发射时，底层 `activate` 机制会比对 Sender 所在线程与 `receiver` 所在线程，若二者不一致，则会将 Lambda 包装为 `QMetaCallEvent`，投入 `receiver` 所在线程的事件队列中执行（即 `QueuedConnection`），从而保证线程安全。
+
+然而，三参数重载内部强制硬编码了 `Qt::DirectConnection`，这意味着它完全跳过了上述的线程关联性检查和事件队列投递机制，无论信号在哪个线程发射，Lambda 都会在信号发射的当前线程内同步执行。
+
+如果在后台工作线程中触发了该信号，而 Lambda 内部访问了主线程的 UI 组件或与其他线程共享的数据，且缺乏互斥锁等同步原语的保护，将直接引发数据竞争（Data Race）或竞态条件（Race Condition），这属于未定义行为（UB），会导致内存数据错误或程序崩溃。
+
+### 严格模式（Strict Mode）下的规避方案
+
+由于 Contextless 重载在实际工程中容易引发内存安全和线程安全问题，Qt 官方引入了宏控制废弃该重载。
+
+从 Qt 6.7 开始，官方引入了 `QT_NO_CONTEXTLESS_CONNECT` 宏，在 Qt 6.8 中，官方进一步引入了 `QT_ENABLE_STRICT_MODE_UP_TO` 宏，该宏用于禁用版本历史中被认定为次优或存在潜在危险的 API 集合。
+
+在项目的构建配置中启用严格模式（比如定义 `QT_ENABLE_STRICT_MODE_UP_TO=0x060700` 或更高版本）时，`qtconfigmacros.h` 中的预处理逻辑会自动拦截并定义屏蔽宏：
+
+```cpp
+#if QT_ENABLE_STRICT_MODE_UP_TO >= QT_VERSION_CHECK(6, 7, 0)
+# ifndef QT_NO_CONTEXTLESS_CONNECT
+#  define QT_NO_CONTEXTLESS_CONNECT
+# endif
+#endif // 6.7.0
+```
+
+当 `QT_NO_CONTEXTLESS_CONNECT` 生效后，前文提及的三参数重载模板函数将不参与编译，这一设计表明，明确传递上下文对象（四参数重载）才是现代 Qt 开发中的正确实践。
+
+---
+
 ## 五、小结
 
 综上所述，现代 C++ 风格的 `connect` 重载在底层主要依赖以下机制的配合：
   - 编译期类型校验：利用模板推导和 `static_assert`，完成了信号与槽参数的静态类型检查。
   - MOC 辅助解析：通过向 `static_metacall` 传递特定指令，将函数指针反向解析为整数信号索引，实现高效寻址。
   - 轻量多态机制：通过 `QSlotObjectBase` 统一封装各类可调用对象，并使用静态函数指针加枚举分支的 C 风格分发机制，规避了虚表产生的二进制膨胀问题。
+  - 生命周期与异步安全性：明确了显式传递 Context 对象的必要性，通过将连接生命周期与上下文对象生命周期绑定，并依托事件队列进行线程调度，消除了 Lambda 闭包带来的悬垂指针和数据竞争隐患，该规范在 Qt 6 的严格模式（Strict Mode）下获得了框架层面的保障。
 
-这种设计在兼容基于 `signal_index` 的底层挂载体系的同时，也带来了类型安全与更高的执行效率。
+这种设计在兼容基于 `signal_index` 的底层挂载体系的同时，也带来了类型安全与更高的执行效率，更为复杂的多线程和闭包场景提供了内存与并发安全性支持。
